@@ -8,6 +8,7 @@
 
 #include "rebound.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
@@ -32,6 +33,11 @@
 #define ECOSW 4
 #define INC 5
 #define T0 6
+
+#define MR_RELATION_TERRAN 0
+#define MR_RELATION_NEPTUNIAN 1
+#define MR_RELATION_JOVIAN 2
+#define MR_RELATION_STELLAR 3
 
 #define unif(a, b) rand() / ((double) RAND_MAX) * (b - a) + a
 
@@ -66,6 +72,10 @@ typedef struct {
 typedef struct {
     int isim;        /**< index of the simulation */
     int Nplanets;    /**< number of planets in the system */
+    int Norbits;     /**< number of orbits to run simulations */
+    int inner;       /**< The inner planet in the possible MMR */
+    int outer;       /**< The outer planet in the possible MMR */
+    double Pratio;   /**< Period ratio of the planets in possible MMR */
     double *m;       /**< masses */
     double *P;       /**< periods */
     double *e;       /**< eccentricities */
@@ -92,8 +102,42 @@ typedef struct {
  * 
  * @param x The array in question.
 */
-int lengthof(double *x) {
-    int len = sizeof(x) / sizeof(x[0]);
+int lengthof_double(double *x) {
+    int len = sizeof(*x) / sizeof(x[0]);
+    return len;
+}
+
+/**
+ * Gets the length of an array (of ints).
+ * 
+ * @param x The array in question.
+*/
+int lengthof_int(int *x) {
+    int len = sizeof(*x) / sizeof(x[0]);
+    return len;
+}
+
+/**
+ * Gets the length (along the first axis) of an array (of ints).
+ * 
+ * @param x The array in question.
+*/
+int lengthof_int2d(int **x) {
+    int len = sizeof(**x) / sizeof(x[0]);
+    return len;
+}
+
+/**
+ * Gets the length (in words, I guess?) of an array of strings.
+ * 
+ * @param x The array in question.
+*/
+int lengthof_string_words(char **x) {
+    // TODO: Figure out how to do this; strlen() doesn't work for 2D
+    int len = 0;
+    while (x != NULL) {
+        len++;
+    }
     return len;
 }
 
@@ -104,8 +148,8 @@ int lengthof(double *x) {
  * @return The mean of x.
 */
 double mean(double *x) {
-    double sum, avg;
-    int i, len = lengthof(x);
+    double avg, sum = 0.0;
+    int i, len = lengthof_double(x);
     for (i=0; i<len; i++) {
         sum += x[i];
     }
@@ -120,7 +164,7 @@ double mean(double *x) {
 */
 int count_true(int *x) {
     int num_true = 0;
-    int i, len = lengthof(x);
+    int i, len = lengthof_int(x);
     for (i=0; i<len; i++) {
         if (x[i] == 1) {
             num_true++;
@@ -137,8 +181,8 @@ int count_true(int *x) {
 int count_true_2d(int **x) {
     int num_true = 0;
     int i, j;
-    int xlen = lengthof(x);
-    int ylen = lengthof(x[0]);
+    int xlen = lengthof_int2d(x);
+    int ylen = lengthof_int(x[0]);
     
     for (i=0; i<xlen; i++) {
         for (j=0; j<ylen; j++) {
@@ -151,15 +195,15 @@ int count_true_2d(int **x) {
 }
 
 /**
- * Transposes a 2D array.
+ * Transposes a 2D array of ints.
  * 
  * @param src The input array.
  * @param dest The transpose of src.
 */
-void transpose(int **src, int **dest) {
+void transpose_int(int **src, int **dest) {
     int i, j, xlen, ylen;
-    xlen = lengthof(src);
-    ylen = lengthof(src[0]);
+    xlen = lengthof_int2d(src);
+    ylen = lengthof_int(src[0]);
     
     for (i=0; i<xlen; i++) {
         for (j=0; j<ylen; j++) {
@@ -180,15 +224,15 @@ void transpose(int **src, int **dest) {
  * @return The resonant argument.
 */
 double resonant_argument(struct reb_orbit o1, struct reb_orbit o2,
-                         double *coeff) {
+                         int *coeff) {
     double arg;
     int i, dalembert = 0;
     for (i=0; i<4; i++) {
         dalembert += coeff[i];
     }
     if (dalembert != 1) exit(1);
-    arg = coeff[0] * o1.lambda + coeff[1] * o2.lambda + 
-          coeff[2] * o1.pomega + coeff[3] * o2.pomega;
+    arg = coeff[0] * o1.l + coeff[1] * o2.l + coeff[2] * o1.pomega +
+          coeff[3] * o2.pomega;
     return arg;
 }
 
@@ -211,26 +255,26 @@ double star_radius_from_density(double mass, double density) {
  * Power law mass-radius relationship for a planet, from Chen & Kipping 2017:
  * R ~ M^p.
  * 
- * @param model The index of the model.
- *              0 : "Terran worlds", p = 0.28,
- *              1 : "Neptunian worlds", p = 0.59,
- *              2 : "Jovian worlds", p = -0.04,
- *              3 : "Stellar worlds", p = 0.88.
+ * @param model The index of the model:
+ *              "Terran worlds", p = 0.28,
+ *              "Neptunian worlds", p = 0.59,
+ *              "Jovian worlds", p = -0.04,
+ *              "Stellar worlds", p = 0.88.
  * @param radius The radius of the planet in m.
  * @return The mass of the planet in kg.
 */
 double planet_mass_from_radius(int model, double radius) {
     double mass, power;
-    if (model == 0) {
+    if (model == MR_RELATION_TERRAN) {
         power = 0.28;
         mass = pow(radius / REARTH, 1./power) * MEARTH;
-    } else if (model == 1) {
+    } else if (model == MR_RELATION_NEPTUNIAN) {
         power = 0.59;
         mass = pow(radius / RNEPTUNE, 1./power) * MNEPTUNE;
-    } else if (model == 2) {
+    } else if (model == MR_RELATION_JOVIAN) {
         power = -0.04;
         mass = pow(radius / RJUPITER, 1./power) * MJUPITER;
-    } else if (model == 3) {
+    } else if (model == MR_RELATION_STELLAR) {
         power = 0.88;
         mass = pow(radius / RSUN, 1./power) * MSUN;
     } else {
@@ -251,7 +295,9 @@ double planet_mass_from_radius(int model, double radius) {
  * @return A random number!
 */
 double rv_normal(double m, double s) {
-    double rv, z0, z1, r, theta, u1, u2;
+    double rv, r, theta, u1, u2;
+    double z0;
+    // double z1;
     u1 = unif(0., 1.);
     u2 = unif(0., 1.);
     r = sqrt(-2. * log(u1));
@@ -272,10 +318,10 @@ double rv_normal(double m, double s) {
  * @return The slope.
 */
 double slope_best_fit(double *x, double *y) {
-    int len = lengthof(x);
+    int len = lengthof_double(x);
     double xx[len], xy[len];
-    double meanx, meany, meanxx, meanxy;
-    for (i=0; i<len; i++) {
+    double meanx, meany, meanxx, meanxy, slope;
+    for (int i=0; i<len; i++) {
         xx[i] = x[i] * x[i];
         xy[i] = x[i] * y[i];
     }
@@ -299,7 +345,7 @@ double period_best_fit(POSTERIORS *pos, double *t0) {
     double period_guess;
 
     period_guess = t0[1] - t0[0];
-    for (int i=0; i<num_obs; i++) {
+    for (int i=0; i<pos->Nobs; i++) {
         obs[i] = round((t0[i] - t0[0]) / period_guess);
     }
     return slope_best_fit(obs, t0);
@@ -308,12 +354,19 @@ double period_best_fit(POSTERIORS *pos, double *t0) {
 /**
  * Helper function for reading in values from the input file.
  * 
- * @param src The input array of numbers as strings.
+ * @param src The input string.
  * @param dest The output array of numbers as doubles.
 */
-void read_from_text(char src[], double dest[]) {
-    for (int i=0; i<lengthof(src); i++) {
-        sscanf(src[i+1], "%lf", &dest[i]);
+void read_from_text(char *src, double *dest) {
+    // for (int i=0; i<lengthof_string_words(src); i++) {
+    //     sscanf(src[i+1], "%lf", &dest[i]);
+    // }
+    int i = 0;
+    char *token = strtok(src, " ");
+    while (token != NULL) {
+        sscanf(token, "%lf", &dest[i]);
+        token = strtok(NULL, " ");
+        i++;
     }
 }
 
@@ -324,7 +377,7 @@ void read_from_text(char src[], double dest[]) {
  * @param infile The name of the input file giving posterior distributions.
  * @param pos The struct of posteriors to populate.
 */
-void read_posteriors(POSTERIORS *pos) {
+void read_posteriors(char *infile, POSTERIORS *pos) {
     // double num_planets, num_obs;
     // char line[1024];
     // char *token;
@@ -335,11 +388,11 @@ void read_posteriors(POSTERIORS *pos) {
     // token = strtok(line, " ");
     // // TODO: sizeof(token[0]) is not necessarily the size of each entry!!!
     // num_planets = (sizeof(token)/sizeof(token[0]) - 1) / 3;
-    // pos->rho_star[3] = {0.0};
-    // pos->log_ror[3*num_planets] = {0.0};
-    // pos->esinw[3*num_planets] = {0.0};
-    // pos->ecosw[3*num_planets] = {0.0};
-    // pos->inc[3*num_planets] = {0.0};
+    // pos->rho_star[3];
+    // pos->log_ror[3*num_planets];
+    // pos->esinw[3*num_planets];
+    // pos->ecosw[3*num_planets];
+    // pos->inc[3*num_planets];
 
     // while (fgets(line, 1024, fptr)) {
     //     token = strtok(line, " ");
@@ -355,7 +408,7 @@ void read_posteriors(POSTERIORS *pos) {
     //         read_from_text(token, pos->inc);
     //     } else if (memcmp(token[0], "t", 1)) {
     //         num_obs = ((sizeof(token)/sizeof(token[0]) - 1) / 3) / num_planets;
-    //         pos->t0[3*num_planets*num_obs] = {0.0};
+    //         pos->t0[3*num_planets*num_obs];
     //         read_from_text(token, pos->t0);
     //     } else {
     //         exit(1);
@@ -365,26 +418,30 @@ void read_posteriors(POSTERIORS *pos) {
 
     FILE *fptr;
     char line[1024];
-    char *token;
     int a=0, b=0, c=0, d=0, e=0, f=0;
+    int i;
+
+    fptr = fopen(infile, "r");
+    if (fptr == NULL) exit(1);
 
     pos->Nplanets = 0;
     pos->Nobs = 0;
     // TODO: Does this work?
-    for (int i=0; i<strlen(pos->columns); i++) {
+    for (i=0; i<lengthof_string_words(pos->columns); i++) {
         if (memcmp(pos->columns[i], "l", 1)) {
             pos->Nplanets++;
         }
     }
-    for (i=0; i<strlen(pos->columns); i++) {
+    for (i=0; i<lengthof_string_words(pos->columns); i++) {
         if (memcmp(pos->columns[i], "p", 1)) {
             pos->Nobs++;
         }
     }
     pos->Nobs /= pos->Nplanets;
 
-    pos->indices[7][pos->Nplanets][pos->Nobs] = {0};
-    for (i=0; i<strlen(pos->columns); i++) {
+    // pos->indices[7][pos->Nplanets][pos->Nobs] = {0};
+    pos->indices = malloc(7 * pos->Nplanets * pos->Nobs * sizeof(int));
+    for (i=0; i<lengthof_string_words(pos->columns); i++) {
         if (memcmp(pos->columns[i], "m", 1)) {
             pos->indices[MSTAR][0][0] = i;
         } else if (memcmp(pos->columns[i], "r", 1)) {
@@ -416,11 +473,12 @@ void read_posteriors(POSTERIORS *pos) {
 
     i = 0;
     while (fgets(line, 1024, fptr)) {
-        token = strtok(line, " ");
-        read_from_text(token, pos->links[i]);
+        read_from_text(line, pos->links[i]);
         i++;
     }
     pos->size = i;
+
+    fclose(fptr);
 }
 
 /**
@@ -432,9 +490,8 @@ void read_posteriors(POSTERIORS *pos) {
  * @param out The struct of output information.
 */
 void sample_posteriors(POSTERIORS *pos, PARAMETERS *par, OUTPUT *out) {
-    double uplim, radius, omega;
-    double *link;
-    double t0[num_obs];
+    double uplim, r_star, radius;
+    double t0[pos->Nobs];
     int randlink, used_before = 0;
 
     uplim = pos->size;
@@ -446,12 +503,16 @@ void sample_posteriors(POSTERIORS *pos, PARAMETERS *par, OUTPUT *out) {
         }
     }
     if (!used_before) {
-        out->randlinks[i] = randlink;
+        r_star = star_radius_from_density(
+            pos->links[randlink][pos->indices[MSTAR][0][0]],
+            pos->links[randlink][pos->indices[RHOSTAR][0][0]]
+        );
+        out->randlinks[par->isim] = randlink;
         par->Nplanets = pos->Nplanets;
-        for (int i=0; i<num_planets; i++) {
+        for (int i=0; i<pos->Nplanets; i++) {
             radius = r_star * pow(10.,
                     pos->links[randlink][pos->indices[LOGROR][i][0]]);
-            par->m[i] = planet_mass_from_radius(1, radius);
+            par->m[i] = planet_mass_from_radius(MR_RELATION_NEPTUNIAN, radius);
             par->w[i] = atan2(
                 pos->links[randlink][pos->indices[ESINW][i][0]],
                 pos->links[randlink][pos->indices[ECOSW][i][0]]
@@ -460,10 +521,11 @@ void sample_posteriors(POSTERIORS *pos, PARAMETERS *par, OUTPUT *out) {
                         sin(par->w[i]);
             par->inc[i] = pos->links[randlink][pos->indices[INC][i][0]];
             par->M[i] = unif(0., 2.*M_PI);
-            for (int j=0; j<num_obs; j++) {
+            for (int j=0; j<pos->Nobs; j++) {
                 t0[j] = pos->links[randlink][pos->indices[T0][i][j]];
             }
             par->P[i] = period_best_fit(pos, t0);
+            par->Pratio = par->P[par->outer-1] / par->P[par->inner-1];
         }
     } else {
         sample_posteriors(pos, par, out);
@@ -477,17 +539,11 @@ void sample_posteriors(POSTERIORS *pos, PARAMETERS *par, OUTPUT *out) {
  * Runs a rebound simulation of the system, for a set of orbital parameters
  * drawn from the posteriors.
  * 
- * @param id Index of the simulation.
- * @param period_ratio The ratio of the outer orbital period to the inner.
- * @param orbits The number of orbits of the innermost planet for which to run
- *               the simulation.
  * @param mstar The mass of the star, in simulation units.
  * @param par The struct of orbital parameters.
 */
-void run_simulation(int id, double period_ratio, double orbits, double mstar,
-                    PARAMETERS par) {
+void run_simulation(double mstar, PARAMETERS par) {
     int interval;
-    struct reb_orbit o1, o2;
     struct reb_simulation *r = reb_simulation_create();
 
     reb_simulation_add_fmt(r, "m", mstar);
@@ -495,18 +551,13 @@ void run_simulation(int id, double period_ratio, double orbits, double mstar,
         reb_simulation_add_fmt(r, "m P e omega M", par.m[i], par.P[i],
                                par.e[i], par.w[i], par.M[i]);
     }
-    o1 = reb_orbit_from_particle(r->G, r->particles[0], r->particles[1]);
-    o2 = reb_orbit_from_particle(r->G, r->particles[0], r->particles[2]);
-    if (id == 0) {
-        period_ratio = o2.P / o1.P;
-    }
     r->G = 1.0;
     r->integrator = REB_INTEGRATOR_WHFAST; // Upgrade to WHFast512 if possible
     r->exact_finish_time = 0;
-    r->dt = 0.05 * o1.P;
-    interval = orbits * sdt / 10 / NUMGRIDTIME;
+    r->dt = 0.05 * par.P[0];
+    interval = par.Norbits * par.P[par.inner-1] / 10 / NUMGRIDTIME;
     reb_simulation_save_to_file_interval(r, ".archive.bin", interval);
-    reb_simulation_integrate(r, orbits * sdt);
+    reb_simulation_integrate(r, par.Norbits * par.P[par.inner-1]);
     reb_simulation_free(r);
 }
 
@@ -538,9 +589,9 @@ void identify_resonant_arguments(OUTPUT *out, int max_den,
     p += q * floor_int;
     
     // Use d'Alembert's rule to find the other possible sets of coefficients
-    argnum = 0
-    for (int r=0; r<max_den; r++) {
-        for (int s=0; s<max_den; s++) {
+    argnum = 0;
+    for (r=0; r<max_den; r++) {
+        for (s=0; s<max_den; s++) {
             if (r + s == q - p) {
                 out->coeffarr[argnum][0] = p;
                 out->coeffarr[argnum][1] = -q;
@@ -564,12 +615,12 @@ void identify_resonant_arguments(OUTPUT *out, int max_den,
  * @return True if the system is in resonance, false if not.
 */
 int is_in_resonance(double *time, double *arg) {
-    int i, j, k, len = lengthof(time);
+    int i, j, k, len = lengthof_double(time);
     double end_time = time[len-1];
     double time_bins[NUMGRIDTIME], arg_bins[NUMGRIDRARG];
-    // int grid[NUMGRIDTIME][NUMGRIDRARG] = {0};
-    int col[NUMGRIDTIME] = {0};
-    int row[NUMGRIDRARG] = {0};
+    // int grid[NUMGRIDTIME][NUMGRIDRARG];
+    int col[NUMGRIDTIME];
+    int row[NUMGRIDRARG];
 
     for (i=0; i<NUMGRIDTIME; i++) {
         time_bins[i] = i * end_time / NUMGRIDTIME;
@@ -587,11 +638,12 @@ int is_in_resonance(double *time, double *arg) {
                     // and move to the next grid box.
                     row[j] = 1;
                     break;
+                } else {
+                    row[j] = 0;
                 }
             }
         }
         col[i] = count_true(row);
-        row[NUMGRIDRARG] = {0};
     }
 
     // If the argument librates more than X% of the time, then mark as resonant
@@ -606,28 +658,24 @@ int is_in_resonance(double *time, double *arg) {
  * Checks whether the system exhibits libration in a certain resonant argument
  * in a given rebound simulation.
  * 
- * @param orbits The number of orbits for which the simulation was run.
+ * @param par The struct of simulation parameters.
  * @param coeff The coefficients specifying the resonant argument.
 */
-int check_resonance(double orbits, double *coeff) {
+int check_resonance(PARAMETERS par, int *coeff) {
     struct reb_simulationarchive *sa;
     struct reb_simulation *r;
     struct reb_orbit o1, o2;
-    double sdt;
-    int num_steps;
-
-    sa = reb_simulation_create_from_file(".archive.bin");
-    r = reb_simulation_create_from_simulationarchive(sa, 0);
-    sdt = reb_orbit_from_particle(r->G, r->particles[0], r->particles[1]).P;
-    reb_simulation_free(r);
-    num_steps = ceil(orbits * std / interval);
-    
+    int num_steps = 10 * NUMGRIDTIME;
     double time[num_steps], arg[num_steps];
+    
+    sa = reb_simulationarchive_create_from_file(".archive.bin");
     for (int i=0; i<num_steps; i++) {
         r = reb_simulation_create_from_simulationarchive(sa, i);
         if (r == NULL) exit(1);
-        o1 = reb_orbit_from_particle(r->G, r->particles[0], r->particles[1]);
-        o2 = reb_orbit_from_particle(r->G, r->particles[0], r->particles[2]);
+        o1 = reb_orbit_from_particle(r->G, r->particles[0],
+                                     r->particles[par.inner]);
+        o2 = reb_orbit_from_particle(r->G, r->particles[0],
+                                     r->particles[par.outer]);
         time[i] = r->t;
         arg[i]  = resonant_argument(o1, o2, coeff);
         reb_simulation_free(r);
@@ -635,22 +683,26 @@ int check_resonance(double orbits, double *coeff) {
     return is_in_resonance(time, arg);
 }
 
-void run_and_analyze_all(double orbits, int num, POSTERIORS *pos,
-                         OUTPUT *out) {
-    PARAMETERS par;
-    double period_ratio;
-    int coeffarr[RARGDEPTH][4];
-    int i, j, permutations;
-    
-    out->randlinks[num] = {0};
-    out->resonant[num][RARGDEPTH] = {0};
-    for (i=0; i<num; i++) {
-        par.isim = i;
-        sample_posteriors(pos, &par, out);
-        run_simulation(i, period_ratio, orbits, 1., par);
-        identify_resonant_arguments(out, 5, period_ratio);
-        for (j=0; j<RARGDEPTH; j++) {
-            out->resonant[i][j] = check_resonance(orbits, out->coeffarr[j]);
+/**
+ * Runs a suite of simulations with system parameters drawn from the provided
+ * posteriors. Then, the likelihood that the system is in resonance is
+ * evaluated.
+ * 
+ * @param num The number of simulations in the sample.
+ * @param pos The struct of posteriors.
+ * @param par The struct of simulation parameters.
+ * @param out The struct of output information.
+*/
+void run_and_analyze_all(POSTERIORS *pos, PARAMETERS *par, OUTPUT *out) {
+    out->randlinks = malloc(out->num * sizeof(int));
+    out->resonant = malloc(out->num * RARGDEPTH * sizeof(int));
+    for (int i=0; i<out->num; i++) {
+        par->isim = i;
+        sample_posteriors(pos, par, out);
+        run_simulation(1., *par);
+        identify_resonant_arguments(out, 5, par->Pratio);
+        for (int j=0; j<RARGDEPTH; j++) {
+            out->resonant[i][j] = check_resonance(*par, out->coeffarr[j]);
         }
     }
 }
@@ -661,16 +713,16 @@ void run_and_analyze_all(double orbits, int num, POSTERIORS *pos,
  * @param out The output struct.
  * @param num The number of simulations that were performed.
 */
-void write_output(OUTPUT *out, int num) {
-    double res_frac, res_for_arg;
-    int **resonant_T;
+void write_output(OUTPUT *out) {
     char *outfile = "mmr.out";
+    double res_frac, res_for_arg;
+    int **resonant_T = malloc(RARGDEPTH * out->num * sizeof(int));
     FILE *fptr = fopen(outfile, "w");
-    
-    transpose(out->resonant, resonant_T);
-    res_frac = count_true_2d(out->resonant) / num;
+
+    transpose_int(out->resonant, resonant_T);
+    res_frac = count_true_2d(out->resonant) / out->num;
     fprintf(fptr, "System is resonant in %f%% of trials.\n\n", res_frac * 100);
-    for (i=0; i<RARGDEPTH; i++) {
+    for (int i=0; i<RARGDEPTH; i++) {
         res_for_arg = count_true(resonant_T[i]);
         fprintf(
             fptr, "p=%d, q=%d, r=%d, s=%d: %f%%", out->coeffarr[i][0],
@@ -691,19 +743,29 @@ void write_output(OUTPUT *out, int num) {
 // }
 
 
-int main(int argc, char *argv[]) {
+int main(int argc, char **argv) {
+    if (argc != 6) {
+        fprintf(stderr, "ERROR: Expected 5 arguments, received %d.\n",
+                argc - 1);
+        fprintf(stderr, "USAGE: %s [name of input file] ", argv[0]);
+        fprintf(stderr, "[inner resonant planet] [outer resonant planet] ");
+        fprintf(stderr, "[number of simulations] [number of orbits per sim]");
+        exit(1);
+    }
+
     POSTERIORS pos;
+    PARAMETERS par;
     OUTPUT out;
     srand(RANDOMSEED);
-    
-    &out->num = argv[2];
-    read_posteriors(argv[1], pos);
 
-    // TEST POSTERIORS HERE
-    // fprintf(stderr, "%d", pos->rho_star[0]);
+    sscanf(argv[2], "%d", &(&par)->inner);
+    sscanf(argv[3], "%d", &(&par)->outer);
+    sscanf(argv[4], "%d", &(&out)->num);
+    sscanf(argv[5], "%d", &(&par)->Norbits);
+    read_posteriors(argv[1], &pos);
 
-    run_and_analyze_all(orbits, num, &pos, &out);
-    write_output(&out, num);
+    run_and_analyze_all(&pos, &par, &out);
+    write_output(&out);
 
     // test_sim();
     return 0;
